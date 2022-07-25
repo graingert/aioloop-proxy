@@ -79,14 +79,15 @@ class CheckKind(enum.Flag):
 
 
 class FixedFut:
-    __fut = None
-
-    def __init__(self, fut, loop):
+    def __init__(self, fut):
         object.__setattr__(self, "_FixedFut__fut", fut)
-        object.__setattr__(self, "_loop", loop)
+
+    @property
+    def _loop(self):
+        return asyncio.futures._get_loop(asyncio.current_task())
 
     def get_loop(self):
-        return self._loop
+        return asyncio.futures._get_loop(asyncio.current_task())
 
     def __getattr__(self, v):
         return getattr(self.__fut, v)
@@ -108,7 +109,7 @@ def _fix_fut(fut):
     loop = task_loop
     while loop is not None:
         if fut_loop is loop:
-            return FixedFut(fut, task_loop)
+            return FixedFut(fut)
         if getattr(loop, "_proxy_loop_marker", False):
             loop = loop._parent  # type: ignore[attr-defined]
         else:
@@ -123,18 +124,8 @@ class Interceptor:
     def __init__(self, coro):
         self._coro = coro
 
-    def __await__(self):
-        return self
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return self.send(None)
-
     def send(self, v):
         return _fix_fut(self._coro.send(v))
-
 
     def throw(self, exc):
         return _fix_fut(self._coro.throw(exc))
