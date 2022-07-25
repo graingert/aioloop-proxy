@@ -30,7 +30,7 @@ from typing import (
 from ._handle import _ProxyHandle, _ProxyTimerHandle
 from ._protocol import _BaseProtocolProxy, _proto_proxy, _proto_proxy_factory
 from ._server import _ServerProxy
-from ._task import Future, Task
+from asyncio import Future, Task
 from ._transport import _BaseTransportProxy, _make_transport_proxy
 
 if sys.version_info >= (3, 8):
@@ -76,6 +76,68 @@ class CheckKind(enum.Flag):
     HANDLES = enum.auto()
 
     ALL = TASKS | SIGNALS | SERVERS | TRANSPORTS | READERS | WRITERS
+
+
+class FixedFut:
+    __fut = None
+
+    def __init__(self, fut, loop):
+        object.__setattr__(self, "_FixedFut__fut", fut)
+        object.__setattr__(self, "_loop", loop)
+
+    def get_loop(self):
+        return self._loop
+
+    def __getattr__(self, v):
+        return getattr(self.__fut, v)
+
+    def __setattr__(self, k, v):
+        return setattr(self.__fut, k, v)
+
+
+def _fix_fut(fut):
+    blocking = getattr(fut, "_asyncio_future_blocking", None)
+    if not blocking:
+        return fut
+
+    fut_loop = asyncio.futures._get_loop(fut)
+    task_loop = asyncio.futures._get_loop(asyncio.current_task())
+    if fut_loop is task_loop:
+        return fut
+
+    loop = task_loop
+    while loop is not None:
+        if fut_loop is loop:
+            return FixedFut(fut, task_loop)
+        if getattr(loop, "_proxy_loop_marker", False):
+            loop = loop._parent  # type: ignore[attr-defined]
+        else:
+            loop = None
+    return fut
+
+import collections.abc
+
+
+@collections.abc.Coroutine.register
+class Interceptor:
+    def __init__(self, coro):
+        self._coro = coro
+
+    def __await__(self):
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.send(None)
+
+    def send(self, v):
+        return _fix_fut(self._coro.send(v))
+
+
+    def throw(self, exc):
+        return _fix_fut(self._coro.throw(exc))
 
 
 class LoopProxy(asyncio.AbstractEventLoop):
@@ -372,11 +434,11 @@ class LoopProxy(asyncio.AbstractEventLoop):
     ) -> "asyncio.Task[_R]":
         self._check_closed()
         if self._task_factory is None:
-            task = Task(coro, loop=self, name=name)
+            task = asyncio.Task(Interceptor(coro), loop=self, name=name)
             if task._source_traceback:
                 del task._source_traceback[-1]
         else:
-            task = self._task_factory(self, coro)  # type: ignore
+            task = self._task_factory(self, Interceptor(coro))  # type: ignore
             if name is not None:
                 try:
                     set_name = task.set_name
